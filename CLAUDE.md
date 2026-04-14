@@ -18,17 +18,13 @@ text from GovInfo       analyses via Claude
 
 ---
 
-## Environment Setup
 
-```bash
-pip install anthropic requests pytest
-```
 
 Required environment variables — never hard-code keys in source files:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-export GOVINFO_API_KEY="..."
+export GOVINFO_API_KEY=4fZPpiwJJS24ScVMPVU4ZjgLxe8AZl9GwPzxOn7m
 ```
 
 ## Claude API
