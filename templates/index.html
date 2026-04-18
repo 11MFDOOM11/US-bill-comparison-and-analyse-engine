@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>US Bill Analyzer</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <div class="header-inner">
+    <div class="header-brand">
+      <div class="header-seal">&#9733;</div>
+      <div>
+        <div class="header-title">US Bill Analyzer</div>
+        <div class="header-subtitle">Congressional Legislation Analysis Engine</div>
+      </div>
+    </div>
+    <div class="header-badge">Powered by Claude AI</div>
+  </div>
+</header>
+
+<main>
+  <!-- Tabs -->
+  <nav class="tabs" role="tablist">
+    <button class="tab-btn active" role="tab" data-tab="analyze">Full Analysis</button>
+    <button class="tab-btn" role="tab" data-tab="summarize">Summary</button>
+    <button class="tab-btn" role="tab" data-tab="search">Search &amp; Analyze</button>
+    <button class="tab-btn" role="tab" data-tab="metadata">Metadata</button>
+  </nav>
+
+  <!-- ── ANALYZE ── -->
+  <section id="tab-analyze" class="tab-panel active">
+    <div class="card">
+      <div class="card-title">Full Structured Analysis</div>
+      <div class="form-grid">
+        <div class="form-row form-row-2">
+          <div class="field">
+            <label for="analyze-pkg">Package ID</label>
+            <input type="text" id="analyze-pkg" placeholder="e.g. BILLS-118hr1234ih">
+            <span class="hint">GovInfo package identifier</span>
+          </div>
+          <div class="field">
+            <label for="analyze-model">Model <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input type="text" id="analyze-model" placeholder="claude-sonnet-4-6">
+            <span class="hint">Leave blank to use the default model</span>
+          </div>
+        </div>
+        <div>
+          <button class="btn btn-primary" id="analyze-btn" onclick="runAnalyze()">
+            <span class="spinner" id="analyze-spinner"></span>
+            <span id="analyze-btn-text">Analyze Bill</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card result-area" id="analyze-result">
+      <div class="result-header">
+        <div class="card-title" style="margin:0;border:none;padding:0">Result</div>
+        <span class="result-badge" id="analyze-badge"></span>
+      </div>
+      <div id="analyze-output"></div>
+    </div>
+  </section>
+
+  <!-- ── SUMMARIZE ── -->
+  <section id="tab-summarize" class="tab-panel">
+    <div class="card">
+      <div class="card-title">Plain-English Summary</div>
+      <div class="form-grid">
+        <div class="form-row form-row-2">
+          <div class="field">
+            <label for="summarize-pkg">Package ID</label>
+            <input type="text" id="summarize-pkg" placeholder="e.g. BILLS-118hr1234ih">
+            <span class="hint">GovInfo package identifier</span>
+          </div>
+          <div class="field">
+            <label for="summarize-model">Model <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input type="text" id="summarize-model" placeholder="claude-sonnet-4-6">
+            <span class="hint">Leave blank to use the default model</span>
+          </div>
+        </div>
+        <div>
+          <button class="btn btn-primary" id="summarize-btn" onclick="runSummarize()">
+            <span class="spinner" id="summarize-spinner"></span>
+            <span id="summarize-btn-text">Summarize Bill</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card result-area" id="summarize-result">
+      <div class="result-header">
+        <div class="card-title" style="margin:0;border:none;padding:0">Summary</div>
+        <span class="result-badge" id="summarize-badge"></span>
+      </div>
+      <div id="summarize-output"></div>
+    </div>
+  </section>
+
+  <!-- ── SEARCH ── -->
+  <section id="tab-search" class="tab-panel">
+    <div class="card">
+      <div class="card-title">Search &amp; Analyze Bills</div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="search-keyword">Keyword</label>
+          <input type="text" id="search-keyword" placeholder="e.g. infrastructure, healthcare, climate">
+        </div>
+        <div class="form-row form-row-3">
+          <div class="field">
+            <label for="search-congress">Congress <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input type="number" id="search-congress" placeholder="e.g. 118" min="1" max="200">
+            <span class="hint">Congress number filter</span>
+          </div>
+          <div class="field">
+            <label for="search-max">Max Results</label>
+            <input type="number" id="search-max" value="3" min="1" max="10">
+            <span class="hint">1&ndash;10 bills</span>
+          </div>
+          <div class="field">
+            <label for="search-model">Model <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input type="text" id="search-model" placeholder="claude-sonnet-4-6">
+          </div>
+        </div>
+        <div class="form-row form-row-2">
+          <div class="field">
+            <label for="search-date-start">Date From <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input type="date" id="search-date-start">
+          </div>
+          <div class="field">
+            <label for="search-date-end">Date To <span style="font-weight:400;color:var(--muted)">(optional)</span></label>
+            <input type="date" id="search-date-end">
+          </div>
+        </div>
+        <div>
+          <button class="btn btn-primary" id="search-btn" onclick="runSearch()">
+            <span class="spinner" id="search-spinner"></span>
+            <span id="search-btn-text">Search &amp; Analyze</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card result-area" id="search-result">
+      <div class="result-header">
+        <div class="card-title" style="margin:0;border:none;padding:0">Results</div>
+        <span class="result-badge" id="search-badge"></span>
+      </div>
+      <div id="search-output"></div>
+    </div>
+  </section>
+
+  <!-- ── METADATA ── -->
+  <section id="tab-metadata" class="tab-panel">
+    <div class="card">
+      <div class="card-title">Bill Metadata</div>
+      <div class="form-grid">
+        <div class="field">
+          <label for="meta-pkg">Package ID</label>
+          <input type="text" id="meta-pkg" placeholder="e.g. BILLS-118hr1234ih">
+          <span class="hint">No Claude API call &mdash; metadata only</span>
+        </div>
+        <div>
+          <button class="btn btn-primary" id="meta-btn" onclick="runMetadata()">
+            <span class="spinner" id="meta-spinner"></span>
+            <span id="meta-btn-text">Fetch Metadata</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card result-area" id="meta-result">
+      <div class="result-header">
+        <div class="card-title" style="margin:0;border:none;padding:0">Metadata</div>
+        <span class="result-badge" id="meta-badge"></span>
+      </div>
+      <div id="meta-output"></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  US Bill Analyzer &nbsp;&bull;&nbsp; Powered by Anthropic Claude &amp; GovInfo API
+</footer>
+
+<script>
+// ── Tab switching ──────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// ── Generic API helper ─────────────────────────────────────────
+async function callApi(endpoint, payload, { btnId, spinnerId, btnTextId, resultId, badgeId, outputId, renderFn }) {
+  const btn = document.getElementById(btnId);
+  const spinner = document.getElementById(spinnerId);
+  const btnText = document.getElementById(btnTextId);
+  const resultArea = document.getElementById(resultId);
+  const badge = document.getElementById(badgeId);
+  const output = document.getElementById(outputId);
+
+  btn.disabled = true;
+  spinner.style.display = 'block';
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+
+    resultArea.style.display = 'block';
+
+    if (data.error) {
+      badge.className = 'result-badge result-badge-err';
+      badge.textContent = 'Error';
+      output.innerHTML = `<div class="error-box">${escHtml(data.error)}</div>`;
+    } else {
+      badge.className = 'result-badge result-badge-ok';
+      badge.textContent = 'Success';
+      output.innerHTML = renderFn(data.result);
+    }
+  } catch (err) {
+    resultArea.style.display = 'block';
+    badge.className = 'result-badge result-badge-err';
+    badge.textContent = 'Error';
+    output.innerHTML = `<div class="error-box">Network error: ${escHtml(err.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    spinner.style.display = 'none';
+  }
+}
+
+// ── Escape HTML ────────────────────────────────────────────────
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ── Render helpers ─────────────────────────────────────────────
+function renderAnalysis(a) {
+  const provisions = (a.key_provisions || [])
+    .map(p => `<li>${escHtml(p)}</li>`).join('');
+
+  return `
+    <div class="bill-title">${escHtml(a.title || a.package_id)}</div>
+    <div class="bill-meta">Package ID: <code>${escHtml(a.package_id)}</code></div>
+
+    <div class="section-label">Plain-English Summary</div>
+    <div class="prose">${escHtml(a.plain_english_summary || '')}</div>
+
+    ${provisions ? `
+    <div class="section-label">Key Provisions</div>
+    <ul class="provisions-list">${provisions}</ul>` : ''}
+
+    ${a.potential_impact ? `
+    <div class="section-label">Potential Impact</div>
+    <div class="prose">${escHtml(a.potential_impact)}</div>` : ''}
+
+    ${a.sponsors_and_context ? `
+    <div class="section-label">Sponsors &amp; Context</div>
+    <div class="prose">${escHtml(a.sponsors_and_context)}</div>` : ''}
+  `;
+}
+
+function renderMetadata(m) {
+  const rows = [
+    ['Title', m.title],
+    ['Package ID', m.package_id],
+    ['Congress', m.congress],
+    ['Bill Type', m.bill_type],
+    ['Bill Number', m.bill_number],
+    ['Date Issued', m.date_issued],
+    ['Session', m.session],
+    ['Collection Code', m.collection_code],
+    ['Government Author', (m.government_author || []).join(', ')],
+  ].filter(([, v]) => v).map(([k, v]) =>
+    `<tr><th>${escHtml(k)}</th><td>${escHtml(v)}</td></tr>`
+  ).join('');
+
+  return `<table class="meta-table"><tbody>${rows}</tbody></table>`;
+}
+
+function renderSearch(analyses) {
+  if (!analyses.length) {
+    return '<div class="prose" style="color:var(--muted)">No results found.</div>';
+  }
+  const cards = analyses.map(a => `
+    <div class="bill-card">
+      <div class="bill-card-header">
+        <div class="bill-title" style="font-size:1rem">${escHtml(a.title || a.package_id)}</div>
+        <span class="package-id-tag">${escHtml(a.package_id)}</span>
+      </div>
+      <div class="section-label" style="margin-top:0">Summary</div>
+      <div class="prose">${escHtml(a.plain_english_summary || '')}</div>
+      ${(a.key_provisions || []).length ? `
+      <div class="section-label">Key Provisions</div>
+      <ul class="provisions-list">
+        ${(a.key_provisions).map(p => `<li>${escHtml(p)}</li>`).join('')}
+      </ul>` : ''}
+      ${a.potential_impact ? `
+      <div class="section-label">Potential Impact</div>
+      <div class="prose">${escHtml(a.potential_impact)}</div>` : ''}
+    </div>
+  `).join('');
+  return `<div class="search-count">${analyses.length} bill${analyses.length !== 1 ? 's' : ''} analyzed</div>${cards}`;
+}
+
+// ── Action functions ───────────────────────────────────────────
+function runAnalyze() {
+  callApi('/api/analyze', {
+    package_id: document.getElementById('analyze-pkg').value,
+    model: document.getElementById('analyze-model').value,
+  }, {
+    btnId: 'analyze-btn',
+    spinnerId: 'analyze-spinner',
+    btnTextId: 'analyze-btn-text',
+    resultId: 'analyze-result',
+    badgeId: 'analyze-badge',
+    outputId: 'analyze-output',
+    renderFn: renderAnalysis,
+  });
+}
+
+function runSummarize() {
+  callApi('/api/summarize', {
+    package_id: document.getElementById('summarize-pkg').value,
+    model: document.getElementById('summarize-model').value,
+  }, {
+    btnId: 'summarize-btn',
+    spinnerId: 'summarize-spinner',
+    btnTextId: 'summarize-btn-text',
+    resultId: 'summarize-result',
+    badgeId: 'summarize-badge',
+    outputId: 'summarize-output',
+    renderFn: summary => `<div class="summary-text">${escHtml(summary)}</div>`,
+  });
+}
+
+function runSearch() {
+  callApi('/api/search', {
+    keyword: document.getElementById('search-keyword').value,
+    congress: document.getElementById('search-congress').value,
+    max_results: document.getElementById('search-max').value,
+    model: document.getElementById('search-model').value,
+    date_start: document.getElementById('search-date-start').value,
+    date_end: document.getElementById('search-date-end').value,
+  }, {
+    btnId: 'search-btn',
+    spinnerId: 'search-spinner',
+    btnTextId: 'search-btn-text',
+    resultId: 'search-result',
+    badgeId: 'search-badge',
+    outputId: 'search-output',
+    renderFn: renderSearch,
+  });
+}
+
+function runMetadata() {
+  callApi('/api/metadata', {
+    package_id: document.getElementById('meta-pkg').value,
+  }, {
+    btnId: 'meta-btn',
+    spinnerId: 'meta-spinner',
+    btnTextId: 'meta-btn-text',
+    resultId: 'meta-result',
+    badgeId: 'meta-badge',
+    outputId: 'meta-output',
+    renderFn: renderMetadata,
+  });
+}
+
+// Allow Enter key to submit forms
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  const active = document.querySelector('.tab-panel.active');
+  if (!active) return;
+  const tab = active.id.replace('tab-', '');
+  ({ analyze: runAnalyze, summarize: runSummarize, search: runSearch, metadata: runMetadata }[tab] || (() => {}))();
+});
+</script>
+</body>
+</html>
