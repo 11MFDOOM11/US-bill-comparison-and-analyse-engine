@@ -11,3 +11,11 @@ class GovInfoAPIError(BillAnalyzerError):
 
 class ClaudeAPIError(BillAnalyzerError):
     """Raised when the Claude API returns an error or is unreachable."""
+
+
+class CongressGovAPIError(BillAnalyzerError):
+    """Raised when the Congress.gov API returns an error or is unreachable."""
+
+
+class CongressionalRecordAPIError(BillAnalyzerError):
+    """Raised when the Congressional Record API returns an error or is unreachable."""

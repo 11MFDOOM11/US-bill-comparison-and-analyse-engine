@@ -18,6 +18,16 @@ Search for bills and analyse the top results::
 Fetch metadata only (no Claude call, no cost)::
 
     python main.py metadata BILLS-118hr1234ih --json
+
+Show the CRS ground truth for a bill::
+
+    python main.py ground-truth BILLS-118hr1234ih
+
+Compare a bill against Congressional Record floor speeches::
+
+    python main.py compare BILLS-118hr1234ih --sources speeches
+    python main.py compare BILLS-118hr1234ih --sources speeches --chamber House
+    python main.py compare BILLS-118hr1234ih --sources speeches --json
 """
 
 import argparse
@@ -110,6 +120,86 @@ def cmd_metadata(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
         print(f"Author(s):   {', '.join(meta.government_author)}")
 
 
+def cmd_ground_truth(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
+    """Fetch and display the CRS ground truth for a bill."""
+    print(
+        f"Fetching CRS ground truth for {args.package_id!r} …", flush=True
+    )
+    gt = analyzer.get_ground_truth(args.package_id)
+
+    if args.json:
+        print(json.dumps(asdict(gt), indent=2))
+        return
+
+    print(f"\nBill:    {gt.title}")
+    print(f"Package: {gt.package_id}")
+    print(f"Congress/{gt.bill_type.upper()}/{gt.bill_number}")
+    print(f"\nCRS Summary ({gt.crs_action_description}, {gt.crs_summary_date}):")
+    print(f"\n{gt.crs_summary}")
+
+
+def cmd_compare(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
+    """Compare a bill against floor speeches or articles and print results."""
+    sources_mode: str = args.sources
+    chamber: str | None = args.chamber
+
+    print(
+        f"Comparing {args.package_id!r} against {sources_mode} …",
+        flush=True,
+    )
+
+    if sources_mode == "speeches":
+        result = analyzer.compare_floor_speeches(
+            args.package_id, chamber=chamber
+        )
+    else:
+        print(
+            f"Error: unsupported --sources value {sources_mode!r}. "
+            "Only 'speeches' is currently supported.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps(asdict(result), indent=2))
+        return
+
+    print(f"\nBill: {result.bill_title}  [{result.package_id}]")
+    print(f"CRS Ground Truth Date: {result.ground_truth_date}")
+    print(f"\nCRS Summary:\n{result.ground_truth_summary[:500]}…")
+
+    if not result.source_results:
+        print("\nNo source materials found for this bill.")
+        return
+
+    for i, sr in enumerate(result.source_results, 1):
+        src = sr.source
+        print(f"\n{'=' * 60}")
+        print(f"Source {i}: {src.source_name}")
+        if src.source_type == "congressional_record":
+            citation = (
+                f"Cong. Record Vol. {src.volume}, No. {src.issue} "
+                f"— {src.date} | {src.chamber}"
+            )
+            print(f"  {citation}")
+        else:
+            print(f"  {src.date} | {src.url}")
+
+        print(f"  Accuracy Score: {sr.accuracy_score}/100")
+        print(f"  Framing Label:  {sr.framing_label}")
+
+        if sr.discrepancies:
+            print(f"\n  Discrepancies ({len(sr.discrepancies)}):")
+            for disc in sr.discrepancies:
+                conf_badge = f"[{disc.confidence}]"
+                dtype = disc.discrepancy_type.upper()
+                print(f"    {conf_badge} {dtype}: {disc.description}")
+                if disc.bill_reference:
+                    print(f"      Bill ref: {disc.bill_reference}")
+        else:
+            print("\n  No discrepancies identified.")
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -195,6 +285,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output result as JSON",
     )
 
+    # ---- ground-truth ----
+    p_gt = subparsers.add_parser(
+        "ground-truth",
+        help="Show the CRS ground truth summary for a bill (no Claude call)",
+    )
+    p_gt.add_argument(
+        "package_id",
+        help="GovInfo package ID",
+    )
+    p_gt.add_argument(
+        "--json",
+        action="store_true",
+        help="Output result as JSON",
+    )
+
+    # ---- compare ----
+    p_compare = subparsers.add_parser(
+        "compare",
+        help=(
+            "Compare a bill against floor speeches or articles "
+            "and report discrepancies"
+        ),
+    )
+    p_compare.add_argument(
+        "package_id",
+        help="GovInfo package ID",
+    )
+    p_compare.add_argument(
+        "--sources",
+        choices=["speeches", "articles"],
+        default="speeches",
+        help="Source type to compare against (default: speeches)",
+    )
+    p_compare.add_argument(
+        "--chamber",
+        choices=["House", "Senate"],
+        default=None,
+        help="Restrict to one chamber (default: both)",
+    )
+    p_compare.add_argument(
+        "--json",
+        action="store_true",
+        help="Output result as JSON",
+    )
+
     return parser
 
 
@@ -218,6 +353,8 @@ def main() -> None:
         "summarize": cmd_summarize,
         "search": cmd_search,
         "metadata": cmd_metadata,
+        "ground-truth": cmd_ground_truth,
+        "compare": cmd_compare,
     }
 
     try:
