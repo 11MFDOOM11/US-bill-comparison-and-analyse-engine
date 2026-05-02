@@ -12,10 +12,10 @@ politicians represent the legislation against neutral ground truth.
 ## Architecture
 
 ```
-GovInfoAPIClient  →     CongressGovClient    ProPublicaClient
-Fetches raw bill        Fetches CRS-authored  Fetches politician
-text from GovInfo       summaries (ground     statements per bill
-        ↓               truth source)         from ProPublica
+GovInfoAPIClient  →     CongressGovClient    CongressionalRecordClient
+Fetches raw bill        Fetches CRS-authored  Fetches floor speeches
+text from GovInfo       summaries (ground     and debate entries from
+        ↓               truth source)         the Congressional Record
         ↓                      ↓                     ↓
          GroundTruth (dataclass)          SourceMaterial (dataclass)
          Combines raw bill text           Wraps statements/articles
@@ -39,24 +39,25 @@ text from GovInfo       summaries (ground     statements per bill
 
 ```
 bill_analyzer/
-├── __init__.py              # Public exports
-├── exceptions.py            # BillAnalyzerError, GovInfoAPIError,
-│                            # ClaudeAPIError, CongressGovAPIError,
-│                            # ProPublicaAPIError
-├── models.py                # BillMetadata, BillAnalysis,
-│                            # CRSSummary, GroundTruth,
-│                            # PoliticianStatement, SourceMaterial,
-│                            # Discrepancy, ComparisonResult
-├── utils.py                 # PackageIDParser (GovInfo ↔ Congress.gov
-│                            # ID conversion utility)
-├── govinfo_client.py        # GovInfoAPIClient
-├── congress_gov_client.py   # CongressGovClient  ← NEW
-├── propublica_client.py     # ProPublicaClient   ← NEW
-├── claude_client.py         # ClaudeClient (summarise + compare)
-├── comparison_engine.py     # ComparisonEngine   ← NEW
-└── analyzer.py              # BillAnalyzer (top-level orchestrator)
-main.py                      # CLI entry point (argparse)
-requirements.txt             # anthropic, requests
+├── __init__.py                    # Public exports
+├── exceptions.py                  # BillAnalyzerError, GovInfoAPIError,
+│                                  # ClaudeAPIError, CongressGovAPIError,
+│                                  # CongressionalRecordAPIError
+├── models.py                      # BillMetadata, BillAnalysis,
+│                                  # CRSSummary, GroundTruth,
+│                                  # RecordSpeech, SourceMaterial,
+│                                  # Discrepancy, SourceResult,
+│                                  # ComparisonResult
+├── utils.py                       # PackageIDParser (GovInfo ↔ Congress.gov
+│                                  # ID conversion utility)
+├── govinfo_client.py              # GovInfoAPIClient
+├── congress_gov_client.py         # CongressGovClient              ← NEW
+├── congressional_record_client.py # CongressionalRecordClient      ← NEW
+├── claude_client.py               # ClaudeClient (summarise + compare)
+├── comparison_engine.py           # ComparisonEngine               ← NEW
+└── analyzer.py                    # BillAnalyzer (top-level orchestrator)
+main.py                            # CLI entry point (argparse)
+requirements.txt                   # anthropic, requests
 ```
 
 ---
@@ -69,7 +70,6 @@ Required — never hard-code keys in source files:
 export ANTHROPIC_API_KEY="sk-ant-..."
 export GOVINFO_API_KEY="your-govinfo-key"
 export CONGRESS_GOV_API_KEY="your-congress-gov-key"   # register at api.congress.gov/sign-up
-export PROPUBLICA_API_KEY="your-propublica-key"       # request at propublica.org/datastore/api
 ```
 
 Optional overrides:
@@ -200,131 +200,179 @@ Raises `CongressGovAPIError` (subclass of `BillAnalyzerError`) on all failures.
 
 ---
 
-## ProPublica Congress API — ProPublicaClient
+## Congressional Record API — CongressionalRecordClient
 
-- Base URL: `https://api.propublica.org/congress/v1`
-- Auth: `X-API-Key: {key}` **request header** (not a query parameter)
-- Rate limit: 5,000 requests per day
-- Responses: JSON
+The Congressional Record is the official verbatim transcript of everything
+said on the House and Senate floor. It is a US Government work and is
+entirely public domain — no copyright concerns for storage or display.
 
-### Key endpoints for the comparison engine
+- Base URL: `https://api.congress.gov/v3`
+- Auth: same `CONGRESS_GOV_API_KEY` used by `CongressGovClient` — **no
+  additional credentials required**
+- Rate limit: shared 5,000 requests per hour with `CongressGovClient`
+- Responses: JSON; `format=json` query param enforces this
+
+### Why the Congressional Record over member website scraping
+
+Floor speeches are made at the moment a bill is debated or voted on,
+meaning they are directly and temporally tied to the legislation. They are
+attributed, dated, and paginated with a formal citation (volume, issue,
+page). Full article text is returned directly in the API response — no
+secondary fetch via `newspaper3k` is required, unlike scraping member
+websites which have inconsistent HTML structures across 535 offices.
+
+### Key endpoints
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /statements/search.json?query={term}` | Search all member statements by keyword (bill name, number, or topic) |
-| `GET /members/{bioguide_id}/statements/{congress}.json` | All statements by a specific member in a Congress |
-| `GET /{congress}/bills/{bill_slug}/statements.json` | Statements about a specific bill (bill_slug format: `hr1234-118`) |
+| `GET /daily-congressional-record` | List issues; filter by `y` (year) |
+| `GET /daily-congressional-record/{volumeNumber}/{issueNumber}` | Single issue metadata |
+| `GET /daily-congressional-record/{volumeNumber}/{issueNumber}/articles` | All articles/speeches in an issue |
+| `GET /bound-congressional-record` | Bound volumes list |
+| `GET /bound-congressional-record/{year}/{month}/{day}` | Bound entries for a specific date |
 
-### Statement response structure
+### Querying by bill
+
+The Congressional Record API does not expose a direct "search by bill
+number" endpoint. The correct approach is:
+
+1. Retrieve the bill's action timeline from `CongressGovClient` to
+   identify key debate and vote dates.
+2. Query `daily-congressional-record` for those specific dates.
+3. Filter returned articles by `chamber` and keyword-match the bill number
+   or title within article titles and content.
+
+This date-scoped query strategy keeps request volume low and avoids
+processing Record issues unrelated to the bill.
+
+### Article response structure
 
 ```json
 {
-  "results": [
+  "articles": [
     {
-      "title": "Rep. Smith Statement on HR 1234",
-      "member_id": "S000123",
-      "name": "John Smith",
+      "title": "DISCUSSION OF H.R. 1234",
+      "date": "2023-03-15",
       "chamber": "House",
-      "party": "R",
-      "state": "TX",
-      "date": "2023-02-14",
-      "url": "https://smith.house.gov/...",
-      "subjects": ["Healthcare", "Budget"]
+      "part": "House Section",
+      "url": "https://api.congress.gov/v3/daily-congressional-record/...",
+      "fullText": "Mr. SMITH. Mr. Speaker, I rise today in support of..."
     }
   ]
 }
 ```
 
-**Important:** The ProPublica API returns statement metadata and a URL — it
-does not return full statement text. Full text must be fetched from the
-member's `url` field using `requests` + `newspaper3k` (already in scope).
-Cache these fetches aggressively to stay within the daily rate limit.
+`fullText` is returned directly — no secondary HTTP fetch needed.
 
-### ProPublicaClient public methods
+### CongressionalRecordClient public methods
 
 ```python
-def search_statements(
-    self,
-    query: str,
-    offset: int = 0,
-) -> list[PoliticianStatement]:
-    """Search member statements by keyword. Returns metadata + URL."""
-
-def get_statements_for_bill(
+def get_speeches_for_bill(
     self,
     congress: str,
-    bill_slug: str,           # format: "hr1234-118"
-) -> list[PoliticianStatement]:
-    """Fetch statements specifically tagged to a bill."""
+    bill_type: str,
+    bill_number: str,
+    action_dates: list[str],    # ISO 8601 dates from bill actions
+    chamber: str | None = None, # "House" | "Senate" | None for both
+) -> list[RecordSpeech]:
+    """
+    Fetch floor speeches referencing this bill.
+    Queries daily-congressional-record for each action date,
+    filters articles by bill number/title keyword match.
+    """
 
-def get_member_statements(
+def get_speeches_by_package_id(
     self,
-    bioguide_id: str,
-    congress: str,
-) -> list[PoliticianStatement]:
-    """All statements by a specific member in a Congress."""
+    package_id: str,
+    chamber: str | None = None,
+) -> list[RecordSpeech]:
+    """
+    Convenience wrapper — parses GovInfo ID, fetches bill action
+    dates from CongressGovClient, then calls get_speeches_for_bill.
+    Requires a CongressGovClient instance passed at construction.
+    """
 ```
 
-Raises `ProPublicaAPIError` (subclass of `BillAnalyzerError`) on all failures.
+Raises `CongressionalRecordAPIError` (subclass of `BillAnalyzerError`) on
+all failures.
 
-### PoliticianStatement dataclass
+### RecordSpeech dataclass
 
 ```python
 @dataclass
-class PoliticianStatement:
-    member_id: str           # ProPublica / Bioguide ID
-    member_name: str
-    party: str               # "R", "D", "I"
-    state: str
-    chamber: str             # "House" or "Senate"
+class RecordSpeech:
+    speaker_name: str        # extracted from article text where possible
+    bioguide_id: str         # matched via Congress.gov member lookup
+    party: str               # "R" | "D" | "I" — from member lookup
+    state: str               # two-letter abbreviation
+    chamber: str             # "House" | "Senate"
     date: str                # ISO 8601
-    title: str
-    url: str                 # source URL — fetch full text from here
-    subjects: list[str]
-    full_text: str = ""      # populated after fetching from url
+    title: str               # article title from the Record
+    volume: str              # Congressional Record volume number
+    issue: str               # issue number within the volume
+    url: str                 # canonical API URL for the article
+    full_text: str           # verbatim floor speech text
 ```
+
+**Speaker extraction note:** The daily record articles contain the full
+text of speeches but do not always return structured speaker metadata
+separately. Speaker names are typically present at the start of each
+speech in the format `Mr./Ms. SURNAME.` — a regex pass on `full_text`
+should extract this, followed by a member lookup against the Congress.gov
+`/member` endpoint using the surname and chamber to resolve `bioguide_id`,
+`party`, and `state`. Cache member lookups — there are only ~535 current
+members and the data changes rarely.
 
 ---
 
 ## SourceMaterial dataclass
 
-Wraps any external representation of a bill (politician statement or news
-article) with provenance metadata so the comparison engine can attribute
-every discrepancy to a specific source.
+Wraps any external representation of a bill (floor speech or news article)
+with provenance metadata so the comparison engine can attribute every
+discrepancy to a specific source.
 
 ```python
 @dataclass
 class SourceMaterial:
-    source_type: str         # "politician_statement" | "news_article"
-    source_name: str         # member name or outlet name
-    party: str | None        # for politician statements
+    source_type: str         # "congressional_record" | "news_article"
+    source_name: str         # speaker name or outlet name
+    party: str | None        # for congressional record entries
     date: str
     url: str
     title: str
     full_text: str
+    # Congressional Record citation fields — populated for source_type="congressional_record"
+    volume: str = ""         # e.g. "169"
+    issue: str = ""          # e.g. "42"
+    chamber: str = ""        # "House" | "Senate"
 ```
 
 ---
 
 ## ComparisonEngine — comparison_engine.py
 
-The comparison engine coordinates `CongressGovClient`, `ProPublicaClient`,
-and `ClaudeClient` to produce `ComparisonResult` objects.
+The comparison engine coordinates `CongressGovClient`,
+`CongressionalRecordClient`, and `ClaudeClient` to produce
+`ComparisonResult` objects.
+
+`CongressionalRecordClient` is injected at construction so it can share
+the same `CONGRESS_GOV_API_KEY` session and member lookup cache.
 
 ### Public methods
 
 ```python
-def compare_politician_statements(
+def compare_floor_speeches(
     self,
     package_id: str,
-    congress: str | None = None,
+    chamber: str | None = None,
 ) -> ComparisonResult:
     """
     1. Build GroundTruth (GovInfo raw text + CRS summary)
-    2. Fetch politician statements via ProPublica
-    3. Fetch full text for each statement
-    4. Send GroundTruth + statements to Claude for discrepancy analysis
-    5. Return ComparisonResult
+    2. Fetch bill action dates from CongressGovClient
+    3. Fetch floor speeches for those dates via CongressionalRecordClient
+    4. Resolve speaker metadata (party, state) for each speech
+    5. Send GroundTruth + speeches to Claude for discrepancy analysis
+    6. Return ComparisonResult
     """
 
 def compare_source_materials(
@@ -415,7 +463,7 @@ BILL_TEXT_EXCERPT:
 SOURCES_TO_ANALYSE:
 [SOURCE 1]
 Type: {source_type}
-Attribution: {source_name} ({party}, {state}) — {date}
+Attribution: {source_name} ({party}-{state}) | {chamber} | Cong. Record Vol. {volume}, No. {issue} — {date}
 URL: {url}
 Text:
 {full_text}
@@ -482,7 +530,8 @@ python main.py metadata BILLS-118hr1234ih --json
 
 # New comparison commands
 python main.py compare BILLS-118hr1234ih
-python main.py compare BILLS-118hr1234ih --sources politicians
+python main.py compare BILLS-118hr1234ih --sources speeches
+python main.py compare BILLS-118hr1234ih --sources speeches --chamber House
 python main.py compare BILLS-118hr1234ih --sources articles --json
 python main.py ground-truth BILLS-118hr1234ih   # show CRS summary only
 ```
@@ -502,7 +551,7 @@ All sub-commands accept `--model MODEL_ID` to override the Claude model.
 - All external I/O wrapped in try/except with descriptive errors
 - `GovInfoAPIError` for all GovInfo failures
 - `CongressGovAPIError` for all Congress.gov failures
-- `ProPublicaAPIError` for all ProPublica failures
+- `CongressionalRecordAPIError` for all Congressional Record failures
 - `ClaudeAPIError` for all Claude / Anthropic SDK failures
 - `BillAnalyzerError` as the shared base (caught at the CLI layer)
 
@@ -518,23 +567,6 @@ All sub-commands accept `--model MODEL_ID` to override the Claude model.
 - Social media coverage
 - International legislation outside the United States
 - Campaign finance cross-referencing (OpenFEC — planned future phase)
-## Project Overview
-
-A Python tool that fetches US government bill text from the GovInfo API and
-uses the Anthropic Claude API to summarise and analyse legislation in plain
-English.
-
-## GovInfo API
-
-- Base URL: `https://api.govinfo.gov`
-- Auth: `api_key` query parameter on every request (injected by `_request_with_retry`)
-- Key endpoints:
-  - `GET /packages/{package_id}/summary` — bill metadata
-  - `GET /packages/{package_id}/htm` — full bill HTML (stripped to plain text)
-  - `POST /search` — search bills by keyword, congress number, date range
-- Exponential back-off retry on `429` and `503` responses
-  (up to 4 retries: 1 s → 2 s → 4 s → 8 s delays)
-- HTML is stripped via regex in `GovInfoAPIClient._strip_html()`
 
 ## Build Order and Integration Constraint — IMPORTANT
 
@@ -549,13 +581,15 @@ Do NOT modify any of the following until explicitly instructed:
 - main.py
 
 Build and verify these new modules independently first:
-1. utils.py (PackageIDParser) — no dependencies on existing code
+1. utils.py               — no dependencies on existing code
 2. congress_gov_client.py — depends only on exceptions.py
-3. propublica_client.py — depends only on exceptions.py
-4. comparison_engine.py — depends on new clients + existing ClaudeClient
+3. congressional_record_client.py — depends on congress_gov_client.py
+                                    for member lookups and action dates
+4. comparison_engine.py   — depends on new clients + existing ClaudeClient
 
-Only after all four are individually tested should integration into
+Only after all four pass independent tests should integration into
 analyzer.py, models.py, __init__.py, and main.py be attempted.
-New exception classes (CongressGovAPIError, ProPublicaAPIError) should be
-added to exceptions.py as append-only — do not alter existing exception classes.
 
+exceptions.py is the only existing file that may be touched during Phase 2
+build — append CongressGovAPIError and CongressionalRecordAPIError only.
+Do not alter or remove existing exception classes.
