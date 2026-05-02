@@ -18,18 +18,6 @@ Search for bills and analyse the top results::
 Fetch metadata only (no Claude call, no cost)::
 
     python main.py metadata BILLS-118hr1234ih --json
-
-Show the CRS ground-truth summary only (no Claude cost)::
-
-    python main.py ground-truth BILLS-118hr1234ih
-
-Compare politician statements against the bill::
-
-    python main.py compare BILLS-118hr1234ih --sources politicians
-
-Compare with JSON output::
-
-    python main.py compare BILLS-118hr1234ih --sources politicians --json
 """
 
 import argparse
@@ -38,7 +26,7 @@ import sys
 from dataclasses import asdict
 
 from bill_analyzer import BillAnalyzer
-from bill_analyzer.exceptions import BillAnalyzerError, CongressGovAPIError
+from bill_analyzer.exceptions import BillAnalyzerError
 
 
 # ---------------------------------------------------------------------------
@@ -100,77 +88,6 @@ def cmd_search(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
             if len(analysis.key_provisions) > 5:
                 extra = len(analysis.key_provisions) - 5
                 print(f"  … and {extra} more provision(s)")
-
-
-def cmd_ground_truth(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
-    """Fetch and display the CRS ground-truth summary without running Claude."""
-    print(f"Fetching CRS ground truth for {args.package_id!r} …", flush=True)
-    try:
-        gt = analyzer.get_ground_truth(args.package_id)
-    except CongressGovAPIError as exc:
-        print(f"Congress.gov error: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    if args.json:
-        print(json.dumps(asdict(gt), indent=2))
-        return
-
-    print(f"\nBill:        {gt.title}")
-    print(f"Package ID:  {gt.package_id}")
-    print(f"Congress:    {gt.congress}  |  Type: {gt.bill_type}  |  Number: {gt.bill_number}")
-    print(f"CRS Date:    {gt.crs_summary_date}  ({gt.crs_action_description})")
-    print(f"\nCRS Summary:\n{gt.crs_summary}")
-
-
-def cmd_compare(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
-    """Compare source materials against the bill's CRS ground truth."""
-    sources_mode = getattr(args, "sources", "politicians")
-    print(
-        f"Comparing {args.package_id!r} against {sources_mode} …",
-        flush=True,
-    )
-
-    try:
-        result = analyzer.compare_politicians(args.package_id)
-    except CongressGovAPIError as exc:
-        print(f"Congress.gov error: {exc}", file=sys.stderr)
-        sys.exit(1)
-
-    if args.json:
-        print(json.dumps(asdict(result), indent=2))
-        return
-
-    print(f"\nBill:              {result.bill_title}")
-    print(f"Package ID:        {result.package_id}")
-    print(f"CRS Summary Date:  {result.ground_truth_date}")
-    print(f"Sources Analysed:  {len(result.source_results)}")
-
-    if not result.source_results:
-        print("\nNo source material found for this bill.")
-        return
-
-    for i, sr in enumerate(result.source_results, 1):
-        print(f"\n{'=' * 60}")
-        src = sr.source
-        party_str = f" ({src.party})" if src.party else ""
-        print(f"Source {i}: {src.source_name}{party_str}")
-        print(f"  Type:           {src.source_type}")
-        print(f"  Date:           {src.date}")
-        print(f"  URL:            {src.url}")
-        print(f"  Accuracy Score: {sr.accuracy_score}/100")
-        print(f"  Framing:        {sr.framing_label}")
-
-        if sr.discrepancies:
-            print(f"\n  Discrepancies ({len(sr.discrepancies)}):")
-            for d in sr.discrepancies:
-                print(
-                    f"    [{d.confidence}] {d.discrepancy_type.upper()}: "
-                    f"{d.description}"
-                )
-                if d.bill_reference:
-                    print(f"      Bill ref: \"{d.bill_reference}\"")
-        else:
-            print("\n  No discrepancies found.")
 
 
 def cmd_metadata(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
@@ -278,48 +195,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output result as JSON",
     )
 
-    # ---- ground-truth ----
-    p_gt = subparsers.add_parser(
-        "ground-truth",
-        help="Show the CRS ground-truth summary for a bill (no Claude call)",
-    )
-    p_gt.add_argument(
-        "package_id",
-        help="GovInfo package ID (e.g. BILLS-118hr1234ih)",
-    )
-    p_gt.add_argument(
-        "--json",
-        action="store_true",
-        help="Output result as JSON",
-    )
-
-    # ---- compare ----
-    p_compare = subparsers.add_parser(
-        "compare",
-        help=(
-            "Compare how politicians represent a bill "
-            "against the CRS ground truth"
-        ),
-    )
-    p_compare.add_argument(
-        "package_id",
-        help="GovInfo package ID (e.g. BILLS-118hr1234ih)",
-    )
-    p_compare.add_argument(
-        "--sources",
-        choices=["politicians", "articles"],
-        default="politicians",
-        metavar="TYPE",
-        help=(
-            "Source type to compare: 'politicians' (default) or 'articles'"
-        ),
-    )
-    p_compare.add_argument(
-        "--json",
-        action="store_true",
-        help="Output result as JSON",
-    )
-
     return parser
 
 
@@ -343,8 +218,6 @@ def main() -> None:
         "summarize": cmd_summarize,
         "search": cmd_search,
         "metadata": cmd_metadata,
-        "ground-truth": cmd_ground_truth,
-        "compare": cmd_compare,
     }
 
     try:
