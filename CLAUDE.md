@@ -536,5 +536,26 @@ English.
   (up to 4 retries: 1 s → 2 s → 4 s → 8 s delays)
 - HTML is stripped via regex in `GovInfoAPIClient._strip_html()`
 
+## Build Order and Integration Constraint — IMPORTANT
 
+The bill summariser (Phase 1) is complete and tested. The comparison engine
+(Phase 2) must be built as a standalone layer before any integration touches
+existing files.
+
+Do NOT modify any of the following until explicitly instructed:
+- bill_analyzer/models.py
+- bill_analyzer/analyzer.py
+- bill_analyzer/__init__.py
+- main.py
+
+Build and verify these new modules independently first:
+1. utils.py (PackageIDParser) — no dependencies on existing code
+2. congress_gov_client.py — depends only on exceptions.py
+3. propublica_client.py — depends only on exceptions.py
+4. comparison_engine.py — depends on new clients + existing ClaudeClient
+
+Only after all four are individually tested should integration into
+analyzer.py, models.py, __init__.py, and main.py be attempted.
+New exception classes (CongressGovAPIError, ProPublicaAPIError) should be
+added to exceptions.py as append-only — do not alter existing exception classes.
 
