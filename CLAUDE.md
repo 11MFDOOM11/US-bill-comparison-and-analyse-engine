@@ -227,26 +227,6 @@ the Congress.gov `/member` endpoint using the surname and chamber to resolve
 Integrating the X API v2 is **technically feasible** but comes with significant
 cost and data volume constraints that must be understood before implementation.
 
-**API access tiers (2025/2026):**
-
-| Tier | Monthly Cost | Post Read Quota | Search Window | Suitable For |
-|---|---|---|---|---|
-| Free | $0 | ~1,500 posts/month (write-only focus) | None | Not usable for read/search |
-| Basic | $100/month | 10,000 posts/month | 7 days recent | Academic prototyping ✓ |
-| Pro | $5,000/month | 1,000,000 posts/month | Full archive | Production scale |
-| Enterprise | $42,000+/month | Custom | Full archive | Large platforms |
-
-**Recommendation for this project:** The Basic tier at $100/month is the only
-realistic option. It provides the `GET /2/tweets/search/recent` endpoint with
-a **7-day rolling search window** and a monthly cap of 10,000 posts. Given
-that a high-profile bill can generate thousands of posts in a single day,
-the search strategy must be highly targeted (see Query Design below) to stay
-within budget.
-
-> **Important:** The free tier removed search functionality. Any search-based
-> implementation requires at minimum the Basic tier. Factor this into the
-> project risk register — this is a recurring cost unlike the one-off APIs
-> already in use.
 
 **Authentication:** App-only authentication using a Bearer Token is sufficient
 for read-only public post searches. No user OAuth flow is needed.
@@ -288,12 +268,7 @@ author_id
 id,name,username,verified,public_metrics,description
 ```
 
-**Rate limits (Basic tier):**
-- 60 requests per 15-minute window on the search endpoint
-- 10,000 posts consumed per calendar month (shared across all search calls)
-- HTTP 429 returned when either limit is hit; `Retry-After` header present
 
----
 
 ### Query Design — Bill-Specific Search Strategy
 
