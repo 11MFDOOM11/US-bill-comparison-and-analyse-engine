@@ -530,8 +530,8 @@ python main.py metadata BILLS-118hr1234ih --json
 
 # New comparison commands
 python main.py compare BILLS-118hr1234ih
-python main.py compare BILLS-118hr1234ih --sources speeches
-python main.py compare BILLS-118hr1234ih --sources speeches --chamber House
+python main.py compare BILLS-117hr1319enr --sources speeches
+python main.py compare BILLS-118hr3746enr --sources speeches --chamber House
 python main.py compare BILLS-118hr1234ih --sources articles --json
 python main.py ground-truth BILLS-118hr1234ih   # show CRS summary only
 ```

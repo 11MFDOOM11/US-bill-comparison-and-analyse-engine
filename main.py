@@ -29,6 +29,8 @@ Compare a bill against Congressional Record floor speeches::
     python main.py compare BILLS-118hr1234ih --sources speeches --chamber House
     python main.py compare BILLS-118hr1234ih --sources speeches --json
 """
+from dotenv import load_dotenv
+load_dotenv()
 
 import argparse
 import json

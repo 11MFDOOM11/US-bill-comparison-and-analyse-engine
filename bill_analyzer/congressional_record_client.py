@@ -3,6 +3,7 @@
 import os
 import re
 import time
+from math import e
 from typing import Any
 
 import requests
@@ -104,14 +105,24 @@ class CongressionalRecordClient:
             f"S.{bill_number}",
             bill_ref,
         ]
+        # DEBUG — confirms action dates arrived and what the filter is looking for
+        print(f"[DEBUG] action_dates received: {action_dates}")
+        print(f"[DEBUG] searching for refs: {alt_refs}")
 
         speeches: list[RecordSpeech] = []
 
         for date_str in action_dates:
+            print(f"[DEBUG] entering loop for {date_str}")  # ADD THIS
             try:
                 articles = self._get_articles_for_date(date_str, chamber)
-            except CongressionalRecordAPIError:
+            except Exception as e:
+                print(f"[DEBUG] _get_articles_for_date failed for {date_str}: {type(e).__name__}: {e}")
                 continue
+
+            print(f"[DEBUG] articles returned for {date_str}: {len(articles)}")  # ADD THIS
+            for i, a in enumerate(articles):
+                print(
+                    f"[DEBUG] article {i}: title='{a.get('title', '')}' | fullText length={len(a.get('fullText', ''))}")
 
             for article in articles:
                 title: str = article.get("title", "")
@@ -125,6 +136,8 @@ class CongressionalRecordClient:
                 excerpt = f"{title} {full_text[:800]}".upper()
                 if not any(ref.upper() in excerpt for ref in alt_refs):
                     continue
+
+                print(f"[DEBUG] matched article: '{title}' | fullText present: {bool(full_text)}")
 
                 speaker_name = self._extract_speaker_name(full_text)
                 member_info = self._lookup_member(speaker_name, article_chamber)
@@ -147,6 +160,7 @@ class CongressionalRecordClient:
                         full_text=full_text,
                     )
                 )
+
 
         return speeches
 
@@ -200,33 +214,53 @@ class CongressionalRecordClient:
     # ------------------------------------------------------------------
 
     def _get_articles_for_date(
-        self,
-        date_str: str,
-        chamber: str | None = None,
+            self,
+            date_str: str,
+            chamber: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return all Congressional Record articles published on *date_str*."""
+
         year = date_str[:4] if date_str else ""
         url = f"{self.BASE_URL}/daily-congressional-record"
-        params: dict[str, Any] = {}
-        if year:
-            params["y"] = year
 
-        response = self._request_with_retry("GET", url, params=params)
+        all_issues: list[dict[str, Any]] = []
+        offset = 0
+        page_size = 20
 
-        if response.status_code != 200:
-            raise CongressionalRecordAPIError(
-                f"Failed to fetch daily Congressional Record list for "
-                f"{date_str}: HTTP {response.status_code}"
-            )
+        # Paginate until all issues for the year are fetched
+        while True:
+            params: dict[str, Any] = {"limit": page_size, "offset": offset}
+            if year:
+                params["y"] = year
 
-        data: dict[str, Any] = response.json()
-        issues: list[dict[str, Any]] = data.get(
-            "dailyCongressionalRecord", []
-        )
+            response = self._request_with_retry("GET", url, params=params)
+
+            if response.status_code != 200:
+                raise CongressionalRecordAPIError(
+                    f"Failed to fetch daily Congressional Record list for "
+                    f"{date_str}: HTTP {response.status_code}"
+                )
+
+            data: dict[str, Any] = response.json()
+            issues: list[dict[str, Any]] = data.get("dailyCongressionalRecord", [])
+
+            if not issues:
+                break
+
+            all_issues.extend(issues)
+
+            # Stop paginating if we received fewer results than the page size
+            if len(issues) < page_size:
+                break
+
+            offset += page_size
 
         all_articles: list[dict[str, Any]] = []
-        for issue in issues:
-            if date_str and issue.get("issueDate", "") != date_str:
+        for issue in all_issues:
+            # Truncate timestamp to date portion before comparing — fixes format mismatch
+            raw_date = issue.get("issueDate", "")
+            issue_date = raw_date[:10]  # '2024-03-08T04:00:00Z' -> '2024-03-08'
+
+            if date_str and issue_date != date_str:
                 continue
 
             volume = str(issue.get("volumeNumber", ""))
@@ -238,15 +272,16 @@ class CongressionalRecordClient:
             try:
                 articles = self._get_issue_articles(volume, issue_num)
                 all_articles.extend(articles)
-            except CongressionalRecordAPIError:
+            except CongressionalRecordAPIError as e:
+                print(f"[DEBUG] _get_issue_articles failed vol={volume} issue={issue_num}: {e}")
                 continue
 
         return all_articles
 
     def _get_issue_articles(
-        self, volume: str, issue_num: str
+            self, volume: str, issue_num: str
     ) -> list[dict[str, Any]]:
-        """Fetch all articles for a specific Congressional Record issue."""
+
         url = (
             f"{self.BASE_URL}/daily-congressional-record"
             f"/{volume}/{issue_num}/articles"
@@ -259,8 +294,43 @@ class CongressionalRecordClient:
                 f"issue {issue_num}: HTTP {response.status_code}"
             )
 
-        return response.json().get("articles", [])
+        raw_sections: list[dict[str, Any]] = response.json().get("articles", [])
 
+        flat_articles: list[dict[str, Any]] = []
+
+        for section in raw_sections:
+            section_name: str = section.get("name", "")
+            for article in section.get("sectionArticles", []):
+                title: str = article.get("title", "")
+
+                # Find the Formatted Text URL for the secondary fetch
+                text_url: str = ""
+                for text_entry in article.get("text", []):
+                    if text_entry.get("type") == "Formatted Text":
+                        text_url = text_entry.get("url", "")
+                        break
+
+                # Fetch the actual speech text from the content URL
+                full_text: str = ""
+                if text_url:
+                    try:
+                        content_response = self._request_with_retry("GET", text_url)
+                        if content_response.status_code == 200:
+                            # Strip HTML tags to get plain text
+                            raw_html = content_response.text
+                            full_text = re.sub(r"<[^>]+>", " ", raw_html)
+                            full_text = re.sub(r"\s+", " ", full_text).strip()
+                    except CongressionalRecordAPIError:
+                        full_text = ""
+
+                flat_articles.append({
+                    "title": title,
+                    "fullText": full_text,
+                    "chamber": section_name,
+                    "url": text_url,
+                })
+
+        return flat_articles
     def _extract_speaker_name(self, text: str) -> str:
         """Extract the first speaker surname from floor speech text.
 
