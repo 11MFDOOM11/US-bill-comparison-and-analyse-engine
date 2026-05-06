@@ -19,3 +19,7 @@ class CongressGovAPIError(BillAnalyzerError):
 
 class CongressionalRecordAPIError(BillAnalyzerError):
     """Raised when the Congressional Record API returns an error or is unreachable."""
+
+
+class XAPIError(BillAnalyzerError):
+    """Raised on any failure communicating with the X API v2."""
