@@ -5,17 +5,18 @@ from .congress_gov_client import CongressGovClient
 from .congressional_record_client import CongressionalRecordClient
 from .exceptions import BillAnalyzerError
 from .govinfo_client import GovInfoAPIClient
-from .models import ComparisonResult, GroundTruth, SourceMaterial
+from .models import ComparisonResult, GroundTruth, SourceMaterial, to_source_material
 from .utils import PackageIDParser
+from .x_client import XClient
 
 
 class ComparisonEngine:
     """Coordinate bill comparison against floor speeches and news articles.
 
     Assembles a :class:`GroundTruth` from GovInfo raw text and the CRS
-    summary, fetches source materials (floor speeches or caller-supplied
-    articles), and delegates to :class:`ClaudeClient` for discrepancy
-    analysis.
+    summary, fetches source materials (floor speeches, caller-supplied
+    articles, or X posts), and delegates to :class:`ClaudeClient` for
+    discrepancy analysis.
 
     Args:
         govinfo_client: Authenticated :class:`GovInfoAPIClient` instance.
@@ -23,6 +24,8 @@ class ComparisonEngine:
         record_client: Authenticated :class:`CongressionalRecordClient`
             instance; must share the same API key as *congress_client*.
         claude_client: Authenticated :class:`ClaudeClient` instance.
+        x_client: Optional authenticated :class:`XClient` instance.
+            Required only for :meth:`compare_x_posts`.
     """
 
     def __init__(
@@ -31,11 +34,13 @@ class ComparisonEngine:
         congress_client: CongressGovClient,
         record_client: CongressionalRecordClient,
         claude_client: ClaudeClient,
+        x_client: XClient | None = None,
     ) -> None:
         self._govinfo = govinfo_client
         self._congress = congress_client
         self._record = record_client
         self._claude = claude_client
+        self._x = x_client
 
     # ------------------------------------------------------------------
     # Public methods
@@ -140,6 +145,65 @@ class ComparisonEngine:
             ground_truth_date=ground_truth.crs_summary_date,
             source_results=source_results,
         )
+
+    def compare_x_posts(
+        self,
+        package_id: str,
+        bill_short_title: str | None = None,
+        min_engagement: int = 10,
+    ) -> ComparisonResult:
+        """Compare a bill against recent X posts.
+
+        Steps:
+
+        1. Build :class:`GroundTruth` from GovInfo text and CRS summary.
+        2. Fetch recent X posts via :meth:`XClient.search_bill_posts`.
+        3. Filter posts below *min_engagement* (like_count + retweet_count)
+           to reduce noise and control Claude API costs.
+        4. Convert :class:`XPost` objects to :class:`SourceMaterial` via
+           :func:`~bill_analyzer.models.to_source_material`.
+        5. Pass ground truth and source materials to Claude for analysis.
+        6. Return a :class:`ComparisonResult`.
+
+        Args:
+            package_id: GovInfo bill ID (e.g. ``"BILLS-119hr1ih"``).
+            bill_short_title: Optional human-readable name included in the
+                X search query (e.g. ``"Big Beautiful Bill"``).
+            min_engagement: Minimum combined likes + retweets a post must
+                have to be included. Defaults to 10.
+
+        Returns:
+            :class:`ComparisonResult` with per-post discrepancy analysis.
+
+        Raises:
+            XAPIError: If :attr:`_x` is ``None`` or the X API call fails.
+            BillAnalyzerError: If any upstream API call fails.
+        """
+        from .exceptions import XAPIError  # local import avoids circular dependency
+
+        if self._x is None:
+            raise XAPIError(
+                "XClient is required for compare_x_posts. "
+                "Pass an XClient instance when constructing ComparisonEngine."
+            )
+
+        ground_truth = self._build_ground_truth(package_id)
+
+        raw_posts = self._x.search_bill_posts(
+            package_id=package_id,
+            bill_short_title=bill_short_title,
+        )
+
+        filtered = [
+            post for post in raw_posts
+            if (post.like_count + post.retweet_count) >= min_engagement
+        ]
+
+        sources: list[SourceMaterial] = [
+            to_source_material(post) for post in filtered
+        ]
+
+        return self.compare_source_materials(ground_truth, sources)
 
     # ------------------------------------------------------------------
     # Private helpers
