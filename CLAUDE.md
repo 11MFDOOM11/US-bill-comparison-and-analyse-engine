@@ -4,24 +4,24 @@
 
 A Python tool that fetches US government bill text from the GovInfo API,
 produces plain-English summaries via the Anthropic Claude API, and runs a
-comparative analysis engine that measures how closely news outlets and
-politicians represent the legislation against neutral ground truth.
+comparative analysis engine that measures how closely news outlets, politicians,
+and social media represent the legislation against neutral ground truth.
 
 ---
 
 ## Architecture
 
 ```
-GovInfoAPIClient  →     CongressGovClient    CongressionalRecordClient
-Fetches raw bill        Fetches CRS-authored  Fetches floor speeches
-text from GovInfo       summaries (ground     and debate entries from
-        ↓               truth source)         the Congressional Record
-        ↓                      ↓                     ↓
-         GroundTruth (dataclass)          SourceMaterial (dataclass)
-         Combines raw bill text           Wraps statements/articles
-         + CRS summary as the            with provenance metadata
+GovInfoAPIClient  →     CongressGovClient    CongressionalRecordClient    XClient
+Fetches raw bill        Fetches CRS-authored  Fetches floor speeches       Fetches posts
+text from GovInfo       summaries (ground     and debate entries from       about a bill
+        ↓               truth source)         the Congressional Record      from X (Twitter)
+        ↓                      ↓                     ↓                           ↓
+         GroundTruth (dataclass)                    SourceMaterial (dataclass)
+         Combines raw bill text                      Wraps statements/articles/posts
+         + CRS summary as the                        with provenance metadata
          neutral comparison baseline
-                  ↓                              ↓
+                  ↓                                         ↓
                    ComparisonEngine (orchestrator)
                    Sends ground truth + source material
                    to Claude for discrepancy analysis
@@ -42,22 +42,25 @@ bill_analyzer/
 ├── __init__.py                    # Public exports
 ├── exceptions.py                  # BillAnalyzerError, GovInfoAPIError,
 │                                  # ClaudeAPIError, CongressGovAPIError,
-│                                  # CongressionalRecordAPIError
+│                                  # CongressionalRecordAPIError,
+│                                  # XAPIError                          ← NEW
 ├── models.py                      # BillMetadata, BillAnalysis,
 │                                  # CRSSummary, GroundTruth,
 │                                  # RecordSpeech, SourceMaterial,
 │                                  # Discrepancy, SourceResult,
-│                                  # ComparisonResult
+│                                  # ComparisonResult,
+│                                  # XPost                              ← NEW
 ├── utils.py                       # PackageIDParser (GovInfo ↔ Congress.gov
 │                                  # ID conversion utility)
 ├── govinfo_client.py              # GovInfoAPIClient
-├── congress_gov_client.py         # CongressGovClient              ← NEW
-├── congressional_record_client.py # CongressionalRecordClient      ← NEW
+├── congress_gov_client.py         # CongressGovClient
+├── congressional_record_client.py # CongressionalRecordClient
+├── x_client.py                    # XClient                           ← NEW
 ├── claude_client.py               # ClaudeClient (summarise + compare)
-├── comparison_engine.py           # ComparisonEngine               ← NEW
+├── comparison_engine.py           # ComparisonEngine
 └── analyzer.py                    # BillAnalyzer (top-level orchestrator)
 main.py                            # CLI entry point (argparse)
-requirements.txt                   # anthropic, requests
+requirements.txt                   # anthropic, requests, tweepy
 ```
 
 ---
@@ -70,12 +73,15 @@ Required — never hard-code keys in source files:
 export ANTHROPIC_API_KEY="sk-ant-..."
 export GOVINFO_API_KEY="your-govinfo-key"
 export CONGRESS_GOV_API_KEY="your-congress-gov-key"   # register at api.congress.gov/sign-up
+export X_BEARER_TOKEN="your-x-bearer-token"           # X API v2 app-only auth (NEW)
 ```
 
 Optional overrides:
 
 ```bash
 export CLAUDE_MODEL="claude-sonnet-4-6"   # default if unset
+export X_MAX_RESULTS="100"                # posts per search page, default 100 (NEW)
+export X_MAX_PAGES="5"                    # pagination cap to control costs (NEW)
 ```
 
 ---
@@ -206,137 +212,410 @@ The Congressional Record is the official verbatim transcript of everything
 said on the House and Senate floor. It is a US Government work and is
 entirely public domain — no copyright concerns for storage or display.
 
-- Base URL: `https://api.congress.gov/v3`
-- Auth: same `CONGRESS_GOV_API_KEY` used by `CongressGovClient` — **no
-  additional credentials required**
-- Rate limit: shared 5,000 requests per hour with `CongressGovClient`
-- Responses: JSON; `format=json` query param enforces this
+Speaker attribution follows the pattern `Mr./Mrs./Ms. SURNAME.` — a regex
+pass on `full_text` should extract this, followed by a member lookup against
+the Congress.gov `/member` endpoint using the surname and chamber to resolve
+`bioguide_id`, `party`, and `state`. Cache member lookups — there are only
+~535 current members and the data changes rarely.
 
-### Why the Congressional Record over member website scraping
+---
 
-Floor speeches are made at the moment a bill is debated or voted on,
-meaning they are directly and temporally tied to the legislation. They are
-attributed, dated, and paginated with a formal citation (volume, issue,
-page). Full article text is returned directly in the API response — no
-secondary fetch via `newspaper3k` is required, unlike scraping member
-websites which have inconsistent HTML structures across 535 offices.
+## X (Twitter) API — XClient  ← NEW PHASE
 
-### Key endpoints
+### Feasibility Assessment
 
-| Endpoint | Purpose |
-|---|---|
-| `GET /daily-congressional-record` | List issues; filter by `y` (year) |
-| `GET /daily-congressional-record/{volumeNumber}/{issueNumber}` | Single issue metadata |
-| `GET /daily-congressional-record/{volumeNumber}/{issueNumber}/articles` | All articles/speeches in an issue |
-| `GET /bound-congressional-record` | Bound volumes list |
-| `GET /bound-congressional-record/{year}/{month}/{day}` | Bound entries for a specific date |
+Integrating the X API v2 is **technically feasible** but comes with significant
+cost and data volume constraints that must be understood before implementation.
 
-### Querying by bill
+**API access tiers (2025/2026):**
 
-The Congressional Record API does not expose a direct "search by bill
-number" endpoint. The correct approach is:
+| Tier | Monthly Cost | Post Read Quota | Search Window | Suitable For |
+|---|---|---|---|---|
+| Free | $0 | ~1,500 posts/month (write-only focus) | None | Not usable for read/search |
+| Basic | $100/month | 10,000 posts/month | 7 days recent | Academic prototyping ✓ |
+| Pro | $5,000/month | 1,000,000 posts/month | Full archive | Production scale |
+| Enterprise | $42,000+/month | Custom | Full archive | Large platforms |
 
-1. Retrieve the bill's action timeline from `CongressGovClient` to
-   identify key debate and vote dates.
-2. Query `daily-congressional-record` for those specific dates.
-3. Filter returned articles by `chamber` and keyword-match the bill number
-   or title within article titles and content.
+**Recommendation for this project:** The Basic tier at $100/month is the only
+realistic option. It provides the `GET /2/tweets/search/recent` endpoint with
+a **7-day rolling search window** and a monthly cap of 10,000 posts. Given
+that a high-profile bill can generate thousands of posts in a single day,
+the search strategy must be highly targeted (see Query Design below) to stay
+within budget.
 
-This date-scoped query strategy keeps request volume low and avoids
-processing Record issues unrelated to the bill.
+> **Important:** The free tier removed search functionality. Any search-based
+> implementation requires at minimum the Basic tier. Factor this into the
+> project risk register — this is a recurring cost unlike the one-off APIs
+> already in use.
 
-### Article response structure
+**Authentication:** App-only authentication using a Bearer Token is sufficient
+for read-only public post searches. No user OAuth flow is needed.
 
-```json
-{
-  "articles": [
-    {
-      "title": "DISCUSSION OF H.R. 1234",
-      "date": "2023-03-15",
-      "chamber": "House",
-      "part": "House Section",
-      "url": "https://api.congress.gov/v3/daily-congressional-record/...",
-      "fullText": "Mr. SMITH. Mr. Speaker, I rise today in support of..."
-    }
-  ]
-}
+---
+
+### X API v2 — Key Endpoint
+
+```
+GET https://api.twitter.com/2/tweets/search/recent
 ```
 
-`fullText` is returned directly — no secondary HTTP fetch needed.
+This is the only search endpoint available below the Pro tier. It searches
+the most recent 7 days of public posts.
 
-### CongressionalRecordClient public methods
+**Required query parameters:**
+
+| Parameter | Description |
+|---|---|
+| `query` | Search string (supports operators — see Query Design) |
+| `max_results` | Posts per page, 10–100 (default 10) |
+| `tweet.fields` | Comma-separated fields to include on each post |
+| `expansions` | Related objects to expand (e.g. author info) |
+| `user.fields` | Fields to include on expanded author objects |
+| `next_token` | Pagination cursor — returned in `meta.next_token` |
+
+**Recommended `tweet.fields`:**
+```
+id,text,created_at,author_id,public_metrics,entities,context_annotations,lang
+```
+
+**Recommended `expansions`:**
+```
+author_id
+```
+
+**Recommended `user.fields`:**
+```
+id,name,username,verified,public_metrics,description
+```
+
+**Rate limits (Basic tier):**
+- 60 requests per 15-minute window on the search endpoint
+- 10,000 posts consumed per calendar month (shared across all search calls)
+- HTTP 429 returned when either limit is hit; `Retry-After` header present
+
+---
+
+### Query Design — Bill-Specific Search Strategy
+
+Poorly constructed queries will waste the monthly post quota on irrelevant
+content. The following strategy is recommended:
+
+**Primary query structure:**
+```
+(<bill_short_title> OR <bill_number_variants>) lang:en -is:retweet
+```
+
+**Example for a known bill:**
+```python
+query = (
+    '("Big Beautiful Bill" OR "HR 1 2025" OR "HR1" OR "#HR1") '
+    'lang:en -is:retweet'
+)
+```
+
+**Query operators to always include:**
+- `lang:en` — filter to English posts only; reduces noise
+- `-is:retweet` — exclude retweets; original content only preserves analytical
+  value and avoids double-counting identical text
+- `-is:reply` — optionally exclude replies to keep to top-level posts
+
+**Query operators for targeted filtering:**
+- `from:<username>` — limit to a specific account (e.g. a politician)
+- `has:links` — posts containing URLs (often higher quality sources)
+- `min_faves:10` — engagement threshold to filter out low-reach noise
+
+**Bill number variants to include in queries:**
+The `PackageIDParser` utility already parses GovInfo IDs into congress, type,
+and number. Extend it to generate X query variants:
 
 ```python
-def get_speeches_for_bill(
-    self,
-    congress: str,
-    bill_type: str,
-    bill_number: str,
-    action_dates: list[str],    # ISO 8601 dates from bill actions
-    chamber: str | None = None, # "House" | "Senate" | None for both
-) -> list[RecordSpeech]:
+@staticmethod
+def to_x_query_variants(package_id: str) -> list[str]:
     """
-    Fetch floor speeches referencing this bill.
-    Queries daily-congressional-record for each action date,
-    filters articles by bill number/title keyword match.
+    Return a list of bill reference strings suitable for X search queries.
+    e.g. BILLS-119hr1ih → ["HR 1", "HR1", "H.R. 1", "H.R.1"]
     """
-
-def get_speeches_by_package_id(
-    self,
-    package_id: str,
-    chamber: str | None = None,
-) -> list[RecordSpeech]:
-    """
-    Convenience wrapper — parses GovInfo ID, fetches bill action
-    dates from CongressGovClient, then calls get_speeches_for_bill.
-    Requires a CongressGovClient instance passed at construction.
-    """
+    congress, bill_type, bill_number = PackageIDParser.to_congress_gov_params(package_id)
+    type_upper = bill_type.upper()  # "HR", "S", "HJRES", etc.
+    return [
+        f"{type_upper} {bill_number}",
+        f"{type_upper}{bill_number}",
+        f"{'.'.join(type_upper)}.{bill_number}",   # "H.R.1"
+        f"{'.'.join(type_upper)}. {bill_number}",  # "H.R. 1"
+    ]
 ```
 
-Raises `CongressionalRecordAPIError` (subclass of `BillAnalyzerError`) on
-all failures.
+---
 
-### RecordSpeech dataclass
+### XPost dataclass — models.py addition
 
 ```python
 @dataclass
-class RecordSpeech:
-    speaker_name: str        # extracted from article text where possible
-    bioguide_id: str         # matched via Congress.gov member lookup
-    party: str               # "R" | "D" | "I" — from member lookup
-    state: str               # two-letter abbreviation
-    chamber: str             # "House" | "Senate"
-    date: str                # ISO 8601
-    title: str               # article title from the Record
-    volume: str              # Congressional Record volume number
-    issue: str               # issue number within the volume
-    url: str                 # canonical API URL for the article
-    full_text: str           # verbatim floor speech text
+class XPost:
+    post_id: str
+    text: str
+    author_id: str
+    author_username: str
+    author_name: str
+    author_verified: bool
+    created_at: str                  # ISO 8601
+    like_count: int
+    retweet_count: int
+    reply_count: int
+    quote_count: int
+    url: str                         # https://x.com/{username}/status/{post_id}
+    lang: str                        # "en"
+    context_annotations: list[dict]  # X's own topic classification — useful for
+                                     # validating that the post is actually about
+                                     # the intended bill
 ```
 
-**Speaker extraction note:** The daily record articles contain the full
-text of speeches but do not always return structured speaker metadata
-separately. Speaker names are typically present at the start of each
-speech in the format `Mr./Ms. SURNAME.` — a regex pass on `full_text`
-should extract this, followed by a member lookup against the Congress.gov
-`/member` endpoint using the surname and chamber to resolve `bioguide_id`,
-`party`, and `state`. Cache member lookups — there are only ~535 current
-members and the data changes rarely.
+`XPost` objects are converted to `SourceMaterial` before being passed to the
+`ComparisonEngine`. The conversion populates `source_type="social_media"` and
+maps engagement metrics into the `title` field as a human-readable label.
+
+```python
+def to_source_material(post: XPost) -> SourceMaterial:
+    return SourceMaterial(
+        source_type="social_media",
+        source_name=f"@{post.author_username}",
+        party=None,          # cannot be inferred from X data alone
+        date=post.created_at,
+        url=post.url,
+        title=(
+            f"X post by @{post.author_username} "
+            f"({post.like_count} likes, {post.retweet_count} retweets)"
+        ),
+        full_text=post.text,
+    )
+```
+
+---
+
+### XClient — x_client.py
+
+```python
+class XClient:
+    """Client for the X API v2 recent search endpoint.
+
+    Uses app-only Bearer Token authentication. Suitable for reading public
+    posts only — no user context or write operations.
+
+    Args:
+        bearer_token: X API v2 Bearer Token. Defaults to ``X_BEARER_TOKEN``.
+        max_results: Posts per page (10–100). Defaults to ``X_MAX_RESULTS``
+            env var or 100.
+        max_pages: Maximum pagination depth per search call. Defaults to
+            ``X_MAX_PAGES`` env var or 5. Acts as a cost control guard.
+
+    Raises:
+        XAPIError: If the Bearer Token is missing or any API call fails.
+    """
+
+    BASE_URL = "https://api.twitter.com/2"
+
+    def __init__(
+        self,
+        bearer_token: str | None = None,
+        max_results: int | None = None,
+        max_pages: int | None = None,
+    ) -> None: ...
+
+    def search_bill_posts(
+        self,
+        package_id: str,
+        bill_short_title: str | None = None,
+        additional_operators: str = "-is:retweet lang:en",
+        since_id: str | None = None,
+    ) -> list[XPost]:
+        """
+        Search recent X posts referencing a bill.
+
+        Constructs a query from bill number variants derived from package_id,
+        optionally supplemented with bill_short_title. Paginates up to
+        max_pages deep and returns a deduplicated list of XPost objects.
+
+        Args:
+            package_id: GovInfo bill ID (e.g. "BILLS-119hr1ih").
+            bill_short_title: Optional human-readable bill name to include
+                in the query (e.g. "Big Beautiful Bill").
+            additional_operators: X query operators appended to every query.
+                Defaults to "-is:retweet lang:en".
+            since_id: If provided, only fetch posts newer than this post ID.
+                Useful for incremental fetches without re-consuming quota.
+
+        Returns:
+            List of XPost objects, sorted newest-first.
+
+        Raises:
+            XAPIError: On authentication failure, rate limit exhaustion, or
+                any non-200 response from the X API.
+        """
+
+    def _build_query(
+        self,
+        package_id: str,
+        bill_short_title: str | None,
+        operators: str,
+    ) -> str:
+        """Build a well-formed X query string from bill identifiers."""
+
+    def _fetch_page(
+        self,
+        query: str,
+        max_results: int,
+        next_token: str | None = None,
+    ) -> tuple[list[XPost], str | None]:
+        """Fetch a single page; return (posts, next_token or None)."""
+
+    def _parse_post(self, raw: dict, users_by_id: dict) -> XPost:
+        """Map a raw API response dict to an XPost dataclass."""
+```
+
+---
+
+### Integration into ComparisonEngine
+
+`ComparisonEngine` gains a new public method alongside the existing
+`compare_floor_speeches` and `compare_source_materials`:
+
+```python
+def compare_x_posts(
+    self,
+    package_id: str,
+    bill_short_title: str | None = None,
+    min_engagement: int = 10,
+) -> ComparisonResult:
+    """
+    1. Build GroundTruth (GovInfo raw text + CRS summary)
+    2. Fetch recent X posts via XClient.search_bill_posts()
+    3. Filter posts below min_engagement threshold (like_count + retweet_count)
+       to reduce noise from low-reach accounts
+    4. Convert XPost objects to SourceMaterial via to_source_material()
+    5. Pass GroundTruth + SourceMaterials to ClaudeClient.compare_to_ground_truth()
+    6. Return ComparisonResult
+
+    Args:
+        package_id: GovInfo bill ID.
+        bill_short_title: Optional short name for the bill, used in the
+            X search query.
+        min_engagement: Minimum combined likes + retweets a post must have
+            to be included in the comparison. Defaults to 10.
+    """
+```
+
+**Cost control note:** The `min_engagement` filter is not just about quality —
+it also reduces the number of posts passed to Claude, directly lowering
+Anthropic API costs per comparison run. For a bill generating thousands of
+mentions, filtering to posts with `min_engagement >= 50` or higher is advisable.
+
+---
+
+### New Exception — exceptions.py addition
+
+Append to `exceptions.py` without modifying existing classes:
+
+```python
+class XAPIError(BillAnalyzerError):
+    """Raised on any failure communicating with the X API v2."""
+```
+
+---
+
+### New Environment Variable
+
+```bash
+export X_BEARER_TOKEN="AAA..."   # App-only Bearer Token from X Developer Portal
+```
+
+Obtain via: developer.twitter.com → Project & Apps → Keys and Tokens →
+Bearer Token. The Basic tier ($100/month) is the minimum required for search.
+
+---
+
+### CLI Commands — main.py additions
+
+```bash
+# Compare X posts about a bill against CRS ground truth
+python main.py compare-x BILLS-119hr1ih
+python main.py compare-x BILLS-119hr1ih --title "Big Beautiful Bill"
+python main.py compare-x BILLS-119hr1ih --min-engagement 50
+python main.py compare-x BILLS-119hr1ih --json
+
+# All sub-commands accept --model MODEL_ID to override the Claude model
+```
+
+---
+
+### Analytical Value — Why X Data Is Worth the Cost
+
+X posts represent a qualitatively different source type from floor speeches
+and news articles. Three properties make them analytically interesting for
+this project:
+
+1. **Unmediated political framing** — politicians' own accounts post about
+   bills without editorial filtering. A senator's thread about a healthcare
+   bill they voted for is a direct data point on how they chose to frame it
+   to their constituents versus what the bill actually says.
+
+2. **Speed of framing** — X posts often appear within hours of a bill being
+   introduced, before media coverage has consolidated around a narrative.
+   Comparing early X framing against CRS summaries (published days later) can
+   reveal where the initial misrepresentation originated.
+
+3. **Engagement-weighted reach** — unlike floor speeches (equal weight
+   regardless of audience) or news articles (hard to measure reach without
+   subscription data), X posts carry public engagement metrics. The comparison
+   engine can weight discrepancies by audience reach, flagging a post with
+   500,000 impressions more severely than one with 12.
+
+---
+
+### Known Limitations and Mitigations
+
+| Limitation | Impact | Mitigation |
+|---|---|---|
+| 7-day search window (Basic tier) | Cannot analyse how a bill was framed at introduction if more than 7 days have passed | Run searches immediately after bill introduction; cache results locally |
+| 10,000 post/month quota | A single high-profile bill can exhaust the monthly quota | Use `min_engagement` filter; restrict to verified/notable accounts only |
+| No party affiliation in API response | Cannot auto-label posts as left/right leaning | Cross-reference `author_username` against known politician account lists (e.g. Congress.gov member data already in use) |
+| Posts are short (280 chars) | Limited context for discrepancy analysis | Group posts by author into a single `SourceMaterial.full_text` block rather than treating each post individually |
+| Context pollution | Queries may return posts about an unrelated bill with the same number from a different congress | Filter by `context_annotations` where X has classified the post's topic; validate bill number references in text |
+
+---
+
+### Build Order — X Integration
+
+X integration is **Phase 3** and must not begin until the comparison engine
+(Phase 2) is fully tested and stable.
+
+```
+Phase 2 complete and tested
+        ↓
+1. exceptions.py — append XAPIError only
+2. models.py    — append XPost dataclass and to_source_material() helper only
+3. utils.py     — append to_x_query_variants() to PackageIDParser only
+4. x_client.py  — build and test independently against live X API
+5. comparison_engine.py — add compare_x_posts() method only
+6. main.py      — add compare-x sub-command only
+```
+
+Do NOT modify `analyzer.py`, `govinfo_client.py`, `congress_gov_client.py`,
+`claude_client.py`, or `congressional_record_client.py` during this phase.
 
 ---
 
 ## SourceMaterial dataclass
 
-Wraps any external representation of a bill (floor speech or news article)
-with provenance metadata so the comparison engine can attribute every
-discrepancy to a specific source.
+Wraps any external representation of a bill (floor speech, news article, or
+social media post) with provenance metadata so the comparison engine can
+attribute every discrepancy to a specific source.
 
 ```python
 @dataclass
 class SourceMaterial:
-    source_type: str         # "congressional_record" | "news_article"
-    source_name: str         # speaker name or outlet name
-    party: str | None        # for congressional record entries
+    source_type: str         # "congressional_record" | "news_article" | "social_media"
+    source_name: str         # speaker name, outlet name, or @username
+    party: str | None        # for congressional record entries; None for social media
     date: str
     url: str
     title: str
@@ -352,11 +631,8 @@ class SourceMaterial:
 ## ComparisonEngine — comparison_engine.py
 
 The comparison engine coordinates `CongressGovClient`,
-`CongressionalRecordClient`, and `ClaudeClient` to produce
+`CongressionalRecordClient`, `XClient`, and `ClaudeClient` to produce
 `ComparisonResult` objects.
-
-`CongressionalRecordClient` is injected at construction so it can share
-the same `CONGRESS_GOV_API_KEY` session and member lookup cache.
 
 ### Public methods
 
@@ -365,22 +641,20 @@ def compare_floor_speeches(
     self,
     package_id: str,
     chamber: str | None = None,
-) -> ComparisonResult:
-    """
-    1. Build GroundTruth (GovInfo raw text + CRS summary)
-    2. Fetch bill action dates from CongressGovClient
-    3. Fetch floor speeches for those dates via CongressionalRecordClient
-    4. Resolve speaker metadata (party, state) for each speech
-    5. Send GroundTruth + speeches to Claude for discrepancy analysis
-    6. Return ComparisonResult
-    """
+) -> ComparisonResult: ...
 
 def compare_source_materials(
     self,
     ground_truth: GroundTruth,
     sources: list[SourceMaterial],
-) -> ComparisonResult:
-    """Core comparison — accepts pre-built inputs for flexibility."""
+) -> ComparisonResult: ...
+
+def compare_x_posts(                      # ← NEW
+    self,
+    package_id: str,
+    bill_short_title: str | None = None,
+    min_engagement: int = 10,
+) -> ComparisonResult: ...
 ```
 
 ---
@@ -410,48 +684,9 @@ def compare_to_ground_truth(
 You are an expert legislative analyst specialising in US congressional bills.
 Your role is to read the raw text of bills and produce clear, accurate,
 plain-English summaries that ordinary citizens can understand.
-
-Guidelines:
-- Be objective and factual; avoid political bias.
-- Use plain language; define any unavoidable legal or technical terms.
-- Focus on what the bill actually does, not what it claims to do.
-- Note significant changes from existing law where apparent.
-- If the bill text is truncated or unclear, say so explicitly.
 ```
 
-### System prompt — comparison engine (NEW, stable, cached)
-
-```
-You are an expert legislative fact-checker specialising in US congressional
-bills. Your task is to compare how politicians and media outlets represent a
-bill against the bill's authoritative Congressional Research Service (CRS)
-summary and full legislative text.
-
-Guidelines:
-- Treat the CRS summary as the neutral ground truth. It is written by
-  non-partisan Congressional Research Service analysts and is the most
-  reliable plain-language description of what a bill actually does.
-- Do not introduce your own political interpretation. Your role is to
-  measure accuracy and framing, not to take sides.
-- Distinguish clearly between factual inaccuracy (a claim contradicts the
-  bill text or CRS summary) and framing difference (a claim is technically
-  accurate but selectively emphasises or omits information).
-- When quoting from source material or bill text, cite the specific passage.
-- Assign confidence levels to each discrepancy: HIGH, MEDIUM, or LOW.
-  HIGH = directly contradicted by the bill text or CRS summary.
-  MEDIUM = unsupported or significantly overstated but not directly refuted.
-  LOW = selective emphasis or omission that creates a misleading impression.
-- Never flag a discrepancy based on political tone alone. Only flag claims
-  that can be verified or refuted against the bill text or CRS summary.
-```
-
-### Comparison user prompt structure (NEW)
-
-The comparison prompt passes three inputs:
-
-1. **CRS Ground Truth block** (cached — large, stable per bill)
-2. **Raw bill text block** (cached — large, stable per bill)
-3. **Source material block** (not cached — changes per source)
+### Source material block (not cached — changes per source)
 
 ```
 GROUND_TRUTH_CRS_SUMMARY:
@@ -519,27 +754,6 @@ class SourceResult:
 
 ---
 
-## CLI Usage
-
-```bash
-# Existing commands
-python main.py analyze BILLS-118hr1234ih
-python main.py summarize BILLS-118hr1234ih
-python main.py search "infrastructure" --congress 118 --max-results 3
-python main.py metadata BILLS-118hr1234ih --json
-
-# New comparison commands
-python main.py compare BILLS-118hr1234ih
-python main.py compare BILLS-118hr1234ih --sources speeches
-python main.py compare BILLS-118hr1234ih --sources speeches --chamber House
-python main.py compare BILLS-118hr1234ih --sources articles --json
-python main.py ground-truth BILLS-118hr1234ih   # show CRS summary only
-```
-
-All sub-commands accept `--model MODEL_ID` to override the Claude model.
-
----
-
 ## Coding Standards
 
 - Python 3.11+
@@ -553,7 +767,35 @@ All sub-commands accept `--model MODEL_ID` to override the Claude model.
 - `CongressGovAPIError` for all Congress.gov failures
 - `CongressionalRecordAPIError` for all Congressional Record failures
 - `ClaudeAPIError` for all Claude / Anthropic SDK failures
+- `XAPIError` for all X API failures
 - `BillAnalyzerError` as the shared base (caught at the CLI layer)
+
+---
+
+## CLI Usage
+
+```bash
+# Existing commands
+python main.py analyze BILLS-118hr1234ih
+python main.py summarize BILLS-118hr1234ih
+python main.py search "infrastructure" --congress 118 --max-results 3
+python main.py metadata BILLS-118hr1234ih --json
+
+# Comparison commands
+python main.py compare BILLS-118hr1234ih
+python main.py compare BILLS-118hr1234ih --sources speeches
+python main.py compare BILLS-118hr1234ih --sources speeches --chamber House
+python main.py compare BILLS-118hr1234ih --sources articles --json
+python main.py ground-truth BILLS-118hr1234ih   # show CRS summary only
+
+# X (Twitter) comparison commands  ← NEW
+python main.py compare-x BILLS-119hr1ih
+python main.py compare-x BILLS-119hr1ih --title "Big Beautiful Bill"
+python main.py compare-x BILLS-119hr1ih --min-engagement 50
+python main.py compare-x BILLS-119hr1ih --json
+```
+
+All sub-commands accept `--model MODEL_ID` to override the Claude model.
 
 ---
 
@@ -564,15 +806,20 @@ All sub-commands accept `--model MODEL_ID` to override the Claude model.
 - Any frontend or UI
 - Any non-Anthropic LLM provider
 - Real-time monitoring of news sources
-- Social media coverage
 - International legislation outside the United States
 - Campaign finance cross-referencing (OpenFEC — planned future phase)
+- X full archive search (requires Pro tier at $5,000/month — out of budget)
+- X streaming / firehose (Enterprise only — out of scope)
+- Comprehensive social media coverage beyond X (Instagram, TikTok, Reddit)
+
+---
 
 ## Build Order and Integration Constraint — IMPORTANT
 
 The bill summariser (Phase 1) is complete and tested. The comparison engine
 (Phase 2) must be built as a standalone layer before any integration touches
-existing files.
+existing files. The X integration (Phase 3) must not begin until Phase 2 is
+fully stable.
 
 Do NOT modify any of the following until explicitly instructed:
 - bill_analyzer/models.py
@@ -580,16 +827,26 @@ Do NOT modify any of the following until explicitly instructed:
 - bill_analyzer/__init__.py
 - main.py
 
-Build and verify these new modules independently first:
+Build and verify new modules independently first.
+
+**Phase 2 build order:**
 1. utils.py               — no dependencies on existing code
 2. congress_gov_client.py — depends only on exceptions.py
 3. congressional_record_client.py — depends on congress_gov_client.py
                                     for member lookups and action dates
 4. comparison_engine.py   — depends on new clients + existing ClaudeClient
 
-Only after all four pass independent tests should integration into
-analyzer.py, models.py, __init__.py, and main.py be attempted.
+**Phase 3 build order (X integration):**
+1. exceptions.py          — append XAPIError only
+2. models.py              — append XPost + to_source_material() only
+3. utils.py               — append to_x_query_variants() to PackageIDParser only
+4. x_client.py            — build and test independently
+5. comparison_engine.py   — add compare_x_posts() method only
+6. main.py                — add compare-x sub-command only
 
-exceptions.py is the only existing file that may be touched during Phase 2
-build — append CongressGovAPIError and CongressionalRecordAPIError only.
-Do not alter or remove existing exception classes.
+Only after all Phase 3 modules pass independent tests should integration into
+`analyzer.py` and `__init__.py` be attempted.
+
+`exceptions.py` is the only existing file that may be touched during Phase 2
+or Phase 3 build — append new exception classes only. Do not alter or remove
+existing exception classes.
