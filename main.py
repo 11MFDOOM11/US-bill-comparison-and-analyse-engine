@@ -36,7 +36,7 @@ import sys
 from dataclasses import asdict
 
 from bill_analyzer import BillAnalyzer
-from bill_analyzer.exceptions import BillAnalyzerError
+from bill_analyzer.exceptions import BillAnalyzerError, XAPIError
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +200,65 @@ def cmd_compare(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
             print("\n  No discrepancies identified.")
 
 
+def cmd_compare_x(args: argparse.Namespace, analyzer: BillAnalyzer) -> None:
+    """Compare a bill against recent X posts and print results."""
+    from bill_analyzer.x_client import XClient
+    from bill_analyzer.comparison_engine import ComparisonEngine
+
+    try:
+        x_client = XClient()
+    except XAPIError as exc:
+        print(f"X API initialisation error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    engine = analyzer._get_comparison_engine()  # noqa: SLF001
+    engine._x = x_client  # noqa: SLF001
+
+    print(
+        f"Comparing {args.package_id!r} against recent X posts "
+        f"(min engagement: {args.min_engagement}) …",
+        flush=True,
+    )
+
+    result = engine.compare_x_posts(
+        package_id=args.package_id,
+        bill_short_title=args.title,
+        min_engagement=args.min_engagement,
+    )
+
+    if args.json:
+        print(json.dumps(asdict(result), indent=2))
+        return
+
+    print(f"\nBill: {result.bill_title}  [{result.package_id}]")
+    print(f"CRS Ground Truth Date: {result.ground_truth_date}")
+    print(f"\nCRS Summary:\n{result.ground_truth_summary[:500]}…")
+
+    if not result.source_results:
+        print("\nNo X posts met the engagement threshold for this bill.")
+        return
+
+    for i, sr in enumerate(result.source_results, 1):
+        src = sr.source
+        print(f"\n{'=' * 60}")
+        print(f"Post {i}: {src.source_name}")
+        print(f"  {src.title}")
+        print(f"  {src.date} | {src.url}")
+        print(f"  Accuracy Score: {sr.accuracy_score}/100")
+        print(f"  Framing Label:  {sr.framing_label}")
+
+        if sr.discrepancies:
+            print(f"\n  Discrepancies ({len(sr.discrepancies)}):")
+            for disc in sr.discrepancies:
+                conf_badge = f"[{disc.confidence}]"
+                dtype = disc.discrepancy_type.upper()
+                print(f"    {conf_badge} {dtype}: {disc.description}")
+                if disc.bill_reference:
+                    print(f"      Bill ref: {disc.bill_reference}")
+        else:
+            print("\n  No discrepancies identified.")
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -330,6 +389,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output result as JSON",
     )
 
+    # ---- compare-x ----
+    p_compare_x = subparsers.add_parser(
+        "compare-x",
+        help=(
+            "Compare a bill against recent X posts and report discrepancies "
+            "(requires X_BEARER_TOKEN)"
+        ),
+    )
+    p_compare_x.add_argument(
+        "package_id",
+        help="GovInfo package ID (e.g. BILLS-119hr1ih)",
+    )
+    p_compare_x.add_argument(
+        "--title",
+        metavar="SHORT_TITLE",
+        default=None,
+        help=(
+            "Short human-readable name for the bill to improve search quality "
+            "(e.g. \"Big Beautiful Bill\")"
+        ),
+    )
+    p_compare_x.add_argument(
+        "--min-engagement",
+        type=int,
+        default=10,
+        metavar="N",
+        help=(
+            "Minimum combined likes + retweets a post must have to be included "
+            "(default: 10)"
+        ),
+    )
+    p_compare_x.add_argument(
+        "--json",
+        action="store_true",
+        help="Output result as JSON",
+    )
+
     return parser
 
 
@@ -355,6 +451,7 @@ def main() -> None:
         "metadata": cmd_metadata,
         "ground-truth": cmd_ground_truth,
         "compare": cmd_compare,
+        "compare-x": cmd_compare_x,
     }
 
     try:

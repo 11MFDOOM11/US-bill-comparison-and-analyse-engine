@@ -165,3 +165,55 @@ class ComparisonResult:
     ground_truth_summary: str   # CRS summary used as the baseline
     ground_truth_date: str
     source_results: list[SourceResult]
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — X (Twitter) integration models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class XPost:
+    """A single public post fetched from the X API v2.
+
+    Includes author metadata, engagement metrics, and X's own topic
+    classification via context_annotations.
+    """
+
+    post_id: str
+    text: str
+    author_id: str
+    author_username: str
+    author_name: str
+    author_verified: bool
+    created_at: str                  # ISO 8601
+    like_count: int
+    retweet_count: int
+    reply_count: int
+    quote_count: int
+    url: str                         # https://x.com/{username}/status/{post_id}
+    lang: str                        # "en"
+    context_annotations: list[dict]  # X topic classification
+
+
+def to_source_material(post: XPost) -> SourceMaterial:
+    """Convert an :class:`XPost` to a :class:`SourceMaterial` for the comparison engine.
+
+    Args:
+        post: X post to convert.
+
+    Returns:
+        :class:`SourceMaterial` with ``source_type="social_media"``.
+    """
+    return SourceMaterial(
+        source_type="social_media",
+        source_name=f"@{post.author_username}",
+        party=None,
+        date=post.created_at,
+        url=post.url,
+        title=(
+            f"X post by @{post.author_username} "
+            f"({post.like_count} likes, {post.retweet_count} retweets)"
+        ),
+        full_text=post.text,
+    )

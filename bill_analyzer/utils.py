@@ -56,3 +56,32 @@ class PackageIDParser:
             Root package ID string, e.g. ``"BILLS-118hr1234"``.
         """
         return f"BILLS-{congress}{bill_type.lower()}{bill_number}"
+
+    @staticmethod
+    def to_x_query_variants(package_id: str) -> list[str]:
+        """Return bill reference strings suitable for X search queries.
+
+        Generates the common ways a bill is referenced in posts so the search
+        query casts a wide net without being overly broad.
+
+        Args:
+            package_id: GovInfo identifier such as ``BILLS-119hr1ih``.
+
+        Returns:
+            List of query strings, e.g.
+            ``["HR 1", "HR1", "H.R.1", "H.R. 1"]``.
+
+        Raises:
+            ValueError: If *package_id* does not match the expected pattern.
+        """
+        _congress, bill_type, bill_number = (
+            PackageIDParser.to_congress_gov_params(package_id)
+        )
+        type_upper = bill_type.upper()  # "HR", "S", "HJRES", etc.
+        dotted = ".".join(type_upper)   # "H.R.", "S.", "H.J.R.E.S.", …
+        return [
+            f"{type_upper} {bill_number}",    # "HR 1"
+            f"{type_upper}{bill_number}",     # "HR1"
+            f"{dotted}.{bill_number}",        # "H.R.1"
+            f"{dotted}. {bill_number}",       # "H.R. 1"
+        ]
