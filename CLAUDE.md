@@ -534,6 +534,8 @@ python main.py compare BILLS-118hr1234ih --sources speeches
 python main.py compare BILLS-118hr1234ih --sources speeches --chamber House
 python main.py compare BILLS-118hr1234ih --sources articles --json
 python main.py ground-truth BILLS-118hr1234ih   # show CRS summary only
+
+python main.py compare-x BILLS-119hr7567ih
 ```
 
 All sub-commands accept `--model MODEL_ID` to override the Claude model.

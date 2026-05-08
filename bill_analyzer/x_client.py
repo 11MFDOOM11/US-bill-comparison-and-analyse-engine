@@ -184,19 +184,8 @@ class XClient:
         bill_short_title: str | None,
         operators: str,
     ) -> str:
-        """Build a well-formed X query string from bill identifiers.
 
-        The query is structured as:
-        ``(<variant_1> OR <variant_2> OR ... [OR "<short title>"]) <operators>``
 
-        Args:
-            package_id: GovInfo bill ID.
-            bill_short_title: Optional short title to include.
-            operators: Additional X query operators (e.g. ``"-is:retweet lang:en"``).
-
-        Returns:
-            Ready-to-use X query string.
-        """
         variants = PackageIDParser.to_x_query_variants(package_id)
         terms = [f'"{v}"' for v in variants]
         if bill_short_title and bill_short_title.strip():
