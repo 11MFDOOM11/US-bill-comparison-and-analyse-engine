@@ -419,6 +419,15 @@ input:focus, select:focus {
   flex-shrink: 0;
 }
 
+/* ── Module sections (unified view) ── */
+.module-section {
+  padding: 1.25rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.module-section:first-child { padding-top: 0; }
+.module-section:last-child { border-bottom: none; padding-bottom: 0; }
+
 /* ── Footer ── */
 footer {
   background: var(--navy);
