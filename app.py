@@ -7,7 +7,8 @@ from dataclasses import asdict
 from flask import Flask, jsonify, render_template, request
 
 from bill_analyzer import BillAnalyzer
-from bill_analyzer.exceptions import BillAnalyzerError
+from bill_analyzer.exceptions import BillAnalyzerError, XAPIError
+from bill_analyzer.x_client import XClient
 
 app = Flask(__name__)
 
@@ -42,10 +43,19 @@ def api_bill():
     def fetch_analysis():
         return analyzer.analyze_by_package_id(package_id)
 
+    def fetch_x_comparison():
+        if not os.environ.get("X_BEARER_TOKEN"):
+            return {"skipped": True, "reason": "X_BEARER_TOKEN not configured"}
+        x_client = XClient()
+        engine = analyzer._get_comparison_engine()
+        engine._x = x_client
+        return engine.compare_x_posts(package_id=package_id, min_engagement=10)
+
     tasks = {
         "metadata": fetch_metadata,
         "summary": fetch_summary,
         "analysis": fetch_analysis,
+        "x_comparison": fetch_x_comparison,
     }
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:

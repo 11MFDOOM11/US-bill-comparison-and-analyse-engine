@@ -388,6 +388,43 @@ function renderBill(result) {
     `);
   }
 
+  parts.push(`<div class="section-label">X Comparison</div>`);
+  if (result.x_comparison && result.x_comparison.skipped) {
+    parts.push(`<div class="prose" style="color:var(--muted)">X comparison unavailable — token not configured</div>`);
+  } else if (result.x_comparison_error) {
+    parts.push(`<div class="error-box">${escHtml(result.x_comparison_error)}</div>`);
+  } else if (result.x_comparison) {
+    const xc = result.x_comparison;
+    if (!xc.source_results || xc.source_results.length === 0) {
+      parts.push(`<div class="prose" style="color:var(--muted)">No X posts met the engagement threshold</div>`);
+    } else {
+      const postCards = xc.source_results.map(sr => {
+        const src = sr.source || {};
+        const score = sr.accuracy_score;
+        const badgeColor = score >= 80 ? '#1a7f37' : score >= 50 ? '#9a6700' : '#d1242f';
+        const badgeBg = score >= 80 ? '#dafbe1' : score >= 50 ? '#fff8c5' : '#ffebe9';
+        const discRows = (sr.discrepancies || []).map(d => {
+          const ref = d.bill_reference
+            ? `<div style="margin-left:1.5rem;color:var(--muted);font-size:0.85em">${escHtml(d.bill_reference)}</div>`
+            : '';
+          return `<div>[${escHtml(d.confidence)}] ${escHtml((d.discrepancy_type || '').toUpperCase())}: ${escHtml(d.description)}${ref}</div>`;
+        }).join('');
+        return `
+          <div style="border:1px solid var(--border);border-radius:6px;padding:0.75rem;margin-bottom:0.75rem">
+            <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.5rem">
+              <span style="font-weight:600">${escHtml(src.source_name || '')}</span>
+              <span style="color:var(--muted);font-size:0.85em">${escHtml(src.date || '')}</span>
+              <span style="background:${badgeBg};color:${badgeColor};padding:2px 8px;border-radius:4px;font-size:0.8em;font-weight:600">${score}</span>
+              <span style="color:var(--muted);font-size:0.85em">${escHtml(sr.framing_label || '')}</span>
+            </div>
+            ${discRows ? `<div class="prose" style="font-size:0.9em">${discRows}</div>` : ''}
+          </div>
+        `;
+      }).join('');
+      parts.push(postCards);
+    }
+  }
+
   return parts.join('') || '<div class="prose" style="color:var(--muted)">No data returned.</div>';
 }
 
