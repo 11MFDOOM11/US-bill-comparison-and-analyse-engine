@@ -1,6 +1,7 @@
 """Flask web UI for the Bill Analyzer."""
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 
 from flask import Flask, jsonify, render_template, request
@@ -18,6 +19,48 @@ def _get_analyzer(model: str | None = None) -> BillAnalyzer:
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/api/bill", methods=["POST"])
+def api_bill():
+    """Run metadata, summary, and analysis concurrently for a single bill."""
+    data = request.get_json(force=True)
+    package_id = (data.get("package_id") or "").strip()
+    model = (data.get("model") or "").strip() or None
+    if not package_id:
+        return jsonify({"error": "package_id is required"}), 400
+
+    analyzer = _get_analyzer(model)
+    result: dict = {}
+
+    def fetch_metadata():
+        return analyzer.get_metadata(package_id)
+
+    def fetch_summary():
+        return analyzer.summarize_by_package_id(package_id)
+
+    def fetch_analysis():
+        return analyzer.analyze_by_package_id(package_id)
+
+    tasks = {
+        "metadata": fetch_metadata,
+        "summary": fetch_summary,
+        "analysis": fetch_analysis,
+    }
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {pool.submit(fn): key for key, fn in tasks.items()}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                value = future.result()
+                result[key] = (
+                    asdict(value) if hasattr(value, "__dataclass_fields__") else value
+                )
+            except BillAnalyzerError as exc:
+                result[f"{key}_error"] = str(exc)
+
+    return jsonify({"result": result})
 
 
 @app.route("/api/analyze", methods=["POST"])
